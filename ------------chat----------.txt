@@ -1,0 +1,428 @@
+Need to be done
+
+1. Queue: song of the list should be replace pending state with current downloading state then success state
+2. Statistics -> 'Total Songs Downloaded' ko replace karke 'Total Songs Downloaded Yet' kardo
+3. Total Downloads and Total Songs Downloaded Yet: both counting should be increase realtime when song downloaded
+4. Statistics ka data flush out nahi hona chahiye kabhi bhi, you need to store it
+5. Instructions: ke section ko overall status ke uper rakho
+6. Task finish hone pe ya stop karne pe ek message aana chahiye.
+
+
+
+------------app.py---------------
+from flask import Flask, render_template, request, jsonify, send_file
+from pytube import YouTube
+from pydub import AudioSegment
+from youtubesearchpython import VideosSearch
+import os
+import zipfile
+import threading
+
+app = Flask(__name__)
+
+downloads_path = "downloads"
+zip_file_path = "downloaded_songs.zip"
+stop_download = False
+current_song = ""
+song_queue = []
+song_status = {}
+song_progress = {}
+total_users = 0
+total_songs = 0
+
+@app.route('/', methods=['GET', 'POST'])
+def index():
+    global stop_download, song_queue, song_status, total_users
+    if request.method == 'POST':
+        song_names = request.form.get('song_names')
+        song_queue = song_names.split(',')
+        stop_download = False
+        song_status = {song: "pending" for song in song_queue}
+        total_users += 1
+
+        threading.Thread(target=start_download).start()
+        return render_template('index.html', song_queue=song_queue, song_status=song_status)
+    
+    return render_template('index.html', song_queue=song_queue, song_status=song_status)
+
+def start_download():
+    clean_download_directory()
+    downloaded_files = download_songs(song_queue)
+    
+    if downloaded_files:
+        create_zip_file(downloaded_files)
+
+def clean_download_directory():
+    if os.path.exists(downloads_path):
+        for file in os.listdir(downloads_path):
+            os.remove(os.path.join(downloads_path, file))
+    else:
+        os.makedirs(downloads_path)
+
+def search_youtube(query):
+    videos_search = VideosSearch(query, limit=1)
+    result = videos_search.result()
+    return result['result'][0]['link'] if result['result'] else None
+
+def download_youtube_as_mp3(url):
+    global stop_download, current_song, song_status, total_songs, song_progress, song_queue
+    try:
+        if stop_download:
+            return None
+        
+        yt = YouTube(url)
+        video = yt.streams.filter(only_audio=True).first()
+        current_song = yt.title
+        song_status[current_song] = "downloading"
+        song_progress[current_song] = 0
+
+        # Download video
+        video.download(output_path=downloads_path)
+        
+        # Convert to MP3
+        base, ext = os.path.splitext(video.default_filename)
+        video_file = os.path.join(downloads_path, video.default_filename)
+        mp3_file = os.path.join(downloads_path, base + '.mp3')
+        
+        audio = AudioSegment.from_file(video_file)
+        audio.export(mp3_file, format="mp3")
+        
+        # Clean up video file
+        os.remove(video_file)
+
+        song_status[current_song] = "finished"
+        song_progress[current_song] = 100
+        total_songs += 1
+        
+        # Remove song from queue once downloaded
+        if current_song in song_queue:
+            song_queue.remove(current_song)
+        
+        return mp3_file
+    except Exception as e:
+        print(f"An error occurred: {e}")
+        song_status[current_song] = f"error: {str(e)}"
+        return None
+
+def download_songs(song_list):
+    downloaded_files = []
+    
+    for song_name in song_list:
+        youtube_url = search_youtube(song_name.strip())
+        if youtube_url:
+            mp3_file = download_youtube_as_mp3(youtube_url)
+            if mp3_file:
+                downloaded_files.append(mp3_file)
+    
+    return downloaded_files
+
+def create_zip_file(file_paths):
+    with zipfile.ZipFile(zip_file_path, 'w') as zip_file:
+        for file in file_paths:
+            zip_file.write(file, os.path.basename(file))
+    
+    return zip_file_path
+
+@app.route('/progress')
+def progress():
+    overall_progress = calculate_overall_progress()
+    return jsonify({
+        "song_status": song_status,
+        "song_progress": song_progress,
+        "current_song": current_song,
+        "overall_progress": overall_progress
+    })
+
+def calculate_overall_progress():
+    if not song_queue:
+        return 0
+    finished_count = sum(1 for status in song_status.values() if status == 'finished')
+    return finished_count / len(song_queue) * 100
+
+@app.route('/statistics')
+def statistics():
+    return jsonify({
+        "total_users": total_users,
+        "total_songs_downloaded_yet": total_songs
+    })
+
+@app.route('/stop', methods=['POST'])
+def stop():
+    global stop_download
+    stop_download = True
+    return jsonify(message="Downloading stopped. You can download the ZIP file now.")
+
+@app.route('/download_zip')
+def download_zip():
+    if not os.path.exists(zip_file_path):
+        return jsonify(message="No songs downloaded."), 400
+    if total_songs == 0:
+        return jsonify(message="No songs downloaded yet."), 400
+    return send_file(zip_file_path, as_attachment=True)
+
+@app.route('/clear_data', methods=['POST'])
+def clear_data():
+    global song_queue, song_status, song_progress, stop_download, current_song
+    song_queue = []
+    song_status = {}
+    song_progress = {}
+    stop_download = True
+    current_song = ""
+    return jsonify(message="Data cleared except statistics.")
+
+if __name__ == "__main__":
+    app.run(debug=True)
+
+
+
+------------app.py---------------
+
+***********************************
+
+------------index.html---------------
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Download MP3 Songs</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+    <style>
+        .progress-bar {
+            height: auto;
+        }
+        .song-item .progress {
+            height: 10px;
+        }
+    </style>
+</head>
+<body class="container">
+    <h1 class="mt-5">Download MP3 Songs</h1>
+    <form id="songForm" method="POST" class="mt-3">
+        <div class="mb-3">
+            <textarea id="songInput" name="song_names" class="form-control" rows="3" placeholder="Enter song names separated by commas"></textarea>
+        </div>
+        <button type="button" id="downloadButton" class="btn btn-primary">Download Songs</button>
+        <button type="button" id="stopButton" class="btn btn-danger" disabled>Stop Download</button>
+        <button type="button" id="clearDataButton" class="btn btn-warning">Clear Data (except Statistics)</button>
+    </form>
+
+    <div class="mt-3">
+        <div class="text-end mb-2">
+            <button id="downloadZipButton" class="btn btn-success" disabled>Download ZIP</button>
+        </div>
+
+        <div class="progress">
+            <div id="overallProgressBar" class="progress-bar progress-bar-striped active" role="progressbar"
+            aria-valuenow="0" aria-valuemin="0" aria-valuemax="100" style="width:0%">
+              <span id="overallProgressBarValue">0%</span>
+            </div>
+          </div>
+
+        <div class="text-center mb-3">
+            <h4 id="downloadCount">Total Downloads: 0</h4>
+            <h4 id="songsDownloadedCount">Total Songs Downloaded Yet: 0</h4>
+        </div>
+        <div id="queueSection">
+            <h2>Queue:</h2>
+            <ul id="queueList" class="list-group"></ul>
+        </div>
+    </div>
+
+    <div class="mt-5">
+        <h2>Instructions:</h2>
+        <ol>
+            <li>Enter song names separated by commas in the textarea.</li>
+            <li>Click "Download Songs" to start downloading the songs.</li>
+            <li>Each song's download progress will be shown with a status color:
+                <ul>
+                    <li><span class="badge bg-warning">Pending</span></li>
+                    <li><span class="badge bg-primary">Downloading</span></li>
+                    <li><span class="badge bg-success">Finished</span></li>
+                    <li><span class="badge bg-danger">Error</span></li>
+                </ul>
+            </li>
+            <li>Click "Stop Download" to halt the download process.</li>
+            <li>Once all downloads are completed or stopped, you can download a ZIP file of the songs.</li>
+        </ol>
+    </div>
+
+    <div class="mt-5">
+        <h2>Statistics:</h2>
+        <div class="d-flex justify-content-around">
+            <div class="text-center p-3 bg-light border rounded">
+                <i class="fas fa-users fa-3x"></i>
+                <h4>Total Users</h4>
+                <h2 id="totalUsers">0</h2>
+            </div>
+            <div class="text-center p-3 bg-info text-white border rounded">
+                <i class="fas fa-music fa-3x"></i>
+                <h4>Total Songs Downloaded</h4>
+                <h2 id="totalSongs">0</h2>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let totalDownloads = 0;
+        let songsDownloaded = 0;
+        let stopDownload = false;
+
+        document.getElementById('downloadButton').onclick = async function() {
+            const songInput = document.getElementById('songInput').value.trim();
+            const songArray = songInput.split(',');
+
+            if (songArray.length === 0 || songArray[0] === '') {
+                alert('Please enter at least one song name.');
+                return;
+            }
+
+            document.getElementById('downloadZipButton').disabled = true;
+            document.getElementById('stopButton').disabled = false;
+
+            document.getElementById('queueList').innerHTML = '';
+            document.getElementById('overallProgressBar').style.width = '0%';
+            document.getElementById('overallProgressBarValue').innerHTML = '0%';
+            document.getElementById('downloadCount').textContent = 'Total Downloads: 0';
+            document.getElementById('songsDownloadedCount').textContent = 'Total Songs Downloaded Yet: 0';
+
+            try {
+                for (let i = 0; i < songArray.length; i++) {
+                    const songName = songArray[i].trim();
+                    const listItem = document.createElement('li');
+                    listItem.id = `song-${i}`;
+                    listItem.className = 'list-group-item song-item bg-warning text-dark';
+                    listItem.textContent = songName;
+                    document.getElementById('queueList').appendChild(listItem);
+
+                    await downloadSong(songName, listItem.id);
+                    if (stopDownload) break;
+                }
+
+                if (!stopDownload) {
+                    document.getElementById('downloadZipButton').disabled = false;
+                    alert('Downloading finished. You can download the ZIP file now.');
+                }
+            } catch (error) {
+                console.error('Error during download:', error);
+                alert('Error occurred during download. Please try again.');
+            } finally {
+                document.getElementById('stopButton').disabled = true;
+                stopDownload = false;
+            }
+        };
+
+        async function downloadSong(songName, listItemID) {
+            try {
+                const response = await fetch(`/download_song/${encodeURIComponent(songName)}`);
+                const data = await response.json();
+
+                if (data.success) {
+                    document.getElementById(listItemID).classList.remove('bg-warning');
+                    document.getElementById(listItemID).classList.add('bg-primary', 'text-white');
+                    document.getElementById(listItemID).innerHTML += `<div class="progress mt-2">
+                        <div class="progress-bar" role="progressbar" style="width: 0%;"></div>
+                    </div>`;
+                    
+                    await updateSongProgress(songName, listItemID);
+                    totalDownloads++;
+                    songsDownloaded++;
+                    document.getElementById('downloadCount').textContent = `Total Downloads: ${totalDownloads}`;
+                    document.getElementById('songsDownloadedCount').textContent = `Total Songs Downloaded Yet: ${songsDownloaded}`;
+                } else {
+                    document.getElementById(listItemID).classList.remove('bg-warning');
+                    document.getElementById(listItemID).classList.add('bg-danger', 'text-white');
+                    document.getElementById(listItemID).innerHTML += `<br>${data.message}`;
+                }
+            } catch (error) {
+                console.error(`Error downloading ${songName}:`, error);
+                document.getElementById(listItemID).classList.remove('bg-warning');
+                document.getElementById(listItemID).classList.add('bg-danger', 'text-white');
+                document.getElementById(listItemID).innerHTML += `<br>Download failed: ${error.message}`;
+            }
+        }
+
+        async function updateSongProgress(songName, listItemID) {
+            const progressElement = document.getElementById(listItemID).querySelector('.progress-bar');
+            let progress = 0;
+            while (progress <= 100) {
+                progressElement.style.width = `${progress}%`;
+                progress += 5; // Simulating progress increment
+                await new Promise(resolve => setTimeout(resolve, 500)); // Simulate async delay
+            }
+            document.getElementById(listItemID).classList.remove('bg-primary');
+            document.getElementById(listItemID).classList.add('bg-success', 'text-white');
+        }
+
+        document.getElementById('stopButton').onclick = function() {
+            stopDownload = true;
+            document.getElementById('stopButton').disabled = true;
+            document.getElementById('downloadZipButton').disabled = true;
+            alert('Downloading stopped.');
+        };
+
+        document.getElementById('downloadZipButton').onclick = function() {
+            if (songsDownloaded === 0) {
+                alert('No songs have been downloaded yet.');
+                return;
+            }
+            // Implement ZIP download functionality here
+            alert('ZIP download functionality to be implemented.');
+        };
+
+        document.getElementById('clearDataButton').onclick = function() {
+            // Implement clear data functionality here
+            alert('Clear data functionality to be implemented.');
+        };
+    </script>
+</body>
+</html>
+
+
+
+------------index.html---------------
+
+***********************************
+
+------------download.html---------------
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Download ZIP</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+</head>
+<body class="container">
+    <h1 class="mt-5">Your Songs are Ready!</h1>
+    <a href="{{ url_for('download_zip') }}" class="btn btn-success">Download ZIP</a>
+</body>
+</html>
+
+------------download.html---------------
+
+***********************************
+
+
+
+Index.html kese kaam karega me batata hun
+
+1. jaise hi koi songs ki list dalega and download songs ke button pe click karege tab
+
+1. a. sabse pahle list ko array me convert karo 
+1. b. fir array map ka use karke list ko front-end "Queue:" wale section me dikhao, yaha pe ye rember rakhna he ki every <li> ka ek unique id hona chahiye
+1. c. ab array map ka fir se use karo and every song ke liye api call karo
+1. c. 1. jab api call hoge kisi song ke liye tab us <li> ka background color blue ho jayega isiliye uski unique ek rakhi he
+1. c. 2. jab song download finish ho jayega tab us <li> ka background color green ho jayega
+1. c. 3. is process ke liye javascript ka async await use karo jisse one by one song download kiya ja sake
+1. c. 4. jab song download ho jeye tab Total Downloads: ko 1 se increment kardo and Total Songs Downloaded Yet ko bhi 1 se increment kardo
+1. c. 5. agar song ke downloading me koi error aa jaye to usi <li> me ek <br> tag laga ke error message display kar do and us <li> ka bg color bhi red kardo
+1. c. 6. jab array ka last item finish ho jaye tab ek message display karo ki downloading finish ho gayi he, ab aap zip file download kar sakte he.
+
+2. a. Jab process 1 running he uske beech me use 'Stop Download' button press karta he to array map stop ho jana chahiye and ek message display hona chahiye ke Dowanloading stoped ho chuki he, 
+
+2. b. isme ye bhi check karna he ki at least 1 song downloading ke baad hi zip downloading ka option dikhe or agar ek bhi song download nahi hua he to ye message dikhe ki ek bhi song download nahi hua he
+
+Iske basis pe agar need he to app.py bhi update karo
